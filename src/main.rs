@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::{Result, ensure};
 
+mod png;
+
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().collect();
     ensure!(args.len() == 2, "specify exactly one target directory");
@@ -15,7 +17,11 @@ fn main() -> Result<()> {
         if file.extension() != Some(OsStr::new("png")) {
             continue;
         }
-        println!("{:?}", file);
+
+        match png::count_colors(&file) {
+            Ok(colors) => println!("{file:?}: {colors} colors"),
+            Err(e) => eprintln!("{file:?}: {e}"),
+        };
     }
 
     Ok(())
