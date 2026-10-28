@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::{Result, ensure};
+use rayon::prelude::*;
 
 mod png;
 
@@ -13,16 +14,7 @@ fn main() -> Result<()> {
     let dir = Path::new(&args[1]);
     ensure!(dir.is_dir(), "specified directory does not exist");
 
-    for file in list_files(dir)? {
-        if file.extension() != Some(OsStr::new("png")) {
-            continue;
-        }
-
-        match png::count_colors(&file) {
-            Ok(colors) => println!("{file:?}: {colors} colors"),
-            Err(e) => eprintln!("{file:?}: {e}"),
-        };
-    }
+    list_files(dir)?.par_iter().for_each(process);
 
     Ok(())
 }
@@ -39,4 +31,15 @@ fn list_files(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+fn process(file: &PathBuf) {
+    if file.extension() != Some(OsStr::new("png")) {
+        return;
+    }
+
+    match png::count_colors(&file) {
+        Ok(colors) => println!("{file:?}: {colors} colors"),
+        Err(e) => eprintln!("{file:?}: {e}"),
+    };
 }
