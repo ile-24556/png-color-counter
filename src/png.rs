@@ -21,37 +21,15 @@ pub fn count_colors(path: &Path) -> Result<usize> {
     };
     ensure!(signature == PNG_SIGNATURE, "wrong signature: {signature:?}");
 
-    let ihdr = Chunk::new(&mut cur, &crc_table)?;
-    ensure!(
-        ihdr.data.len() == 13 && ihdr.type_ == *b"IHDR",
-        "wrong IHDR chunk: {:?}",
-        ihdr
-    );
-    let ihdr = Ihdr::new(&ihdr.data)?;
-    let color_type = match ihdr.color_type {
-        2 => ColorType::Truecolor,
-        6 => ColorType::TruecolorWithAlpha,
-        _ => bail!("unsupported color type: {}", ihdr.color_type),
+    let ihdr = {
+        let ihdr = Chunk::new(&mut cur, &crc_table)?;
+        ensure!(
+            ihdr.data.len() == 13 && ihdr.type_ == *b"IHDR",
+            "wrong IHDR chunk: {:?}",
+            ihdr
+        );
+        Ihdr::new(&ihdr.data)?
     };
-    ensure!(
-        ihdr.bit_depth == 8,
-        "unsupported bit depth: {}",
-        ihdr.bit_depth
-    );
-    ensure!(
-        ihdr.compression_method == 0,
-        "unknown compression method: {}",
-        ihdr.compression_method
-    );
-    ensure!(
-        ihdr.filter_method == 0,
-        "unknown filter method: {}",
-        ihdr.filter_method
-    );
-    ensure!(
-        ihdr.interlace_method == 0,
-        "interlace image is not supported"
-    );
 
     let compressed_data = {
         let mut data = Vec::new();
@@ -65,51 +43,79 @@ pub fn count_colors(path: &Path) -> Result<usize> {
         }
         data
     };
-    println!(
-        "compressed data: {:02x?} ({} B)",
-        compressed_data,
-        compressed_data.len()
-    );
+
+    let bytes_per_pixel: usize = match ihdr.color_type {
+        ColorType::Truecolor => 3,
+        ColorType::TruecolorWithAlpha => 4,
+    };
 
     let filtered_data = {
         let mut decompressor = Decompressor::new();
-        let bytes_per_pixel = match color_type {
-            ColorType::Truecolor => 3,
-            ColorType::TruecolorWithAlpha => 4,
-        };
-        let mut filtered_data =
-            vec![0; (ihdr.height * (1 + bytes_per_pixel * ihdr.width)) as usize];
-        let size = decompressor.zlib_decompress(&compressed_data, &mut filtered_data)?;
-        filtered_data.truncate(size);
+        let expected_len = (1 + bytes_per_pixel * ihdr.width) * ihdr.height;
+        let mut filtered_data = vec![0; expected_len];
+        let len = decompressor.zlib_decompress(&compressed_data, &mut filtered_data)?;
+        ensure!(len == expected_len, "unexpected length of filtered data",);
         filtered_data
     };
-    println!(
-        "filtered data: {:02x?} ({} B)",
-        filtered_data,
-        filtered_data.len()
-    );
+
+    let raw_data = {
+        let raw_width = ihdr.width * bytes_per_pixel;
+        let mut raw_data = vec![0u8; ihdr.height * raw_width];
+
+        for row in 0..ihdr.height {
+            for pos_x in 0..raw_width {
+                let current = filtered_data[(1 + raw_width) * row + 1 + pos_x];
+
+                let a = if pos_x >= bytes_per_pixel {
+                    raw_data[raw_width * row + pos_x - bytes_per_pixel]
+                } else {
+                    0
+                };
+                let b = if row > 0 {
+                    raw_data[raw_width * (row - 1) + pos_x]
+                } else {
+                    0
+                };
+                let c = if pos_x >= bytes_per_pixel && row > 0 {
+                    raw_data[raw_width * (row - 1) + pos_x - bytes_per_pixel]
+                } else {
+                    0
+                };
+
+                let raw_value = match filtered_data[(1 + raw_width) * row] {
+                    0 => current,
+                    1 => current.wrapping_add(a),
+                    2 => current.wrapping_add(b),
+                    3 => current.wrapping_add(((a as u16 + b as u16) / 2) as u8),
+                    4 => current.wrapping_add(paeth_predictor(a, b, c)),
+                    f => bail!("unexpected filter type: {f}"),
+                };
+                raw_data[raw_width * row + pos_x] = raw_value;
+            }
+        }
+        raw_data
+    };
 
     let color_count = {
-        match color_type {
-            ColorType::Truecolor => (),
-            _ => bail!("only truecolor is supported"),
+        let mut raw_data = Cursor::new(raw_data);
+        match ihdr.color_type {
+            ColorType::Truecolor => {
+                let mut colors = HashSet::new();
+                let mut buf = [0; 3];
+                while raw_data.read_exact(&mut buf).is_ok() {
+                    colors.insert(buf);
+                }
+                colors.len()
+            }
+            ColorType::TruecolorWithAlpha => {
+                let mut colors = HashSet::new();
+                let mut buf = [0; 4];
+                while raw_data.read_exact(&mut buf).is_ok() {
+                    colors.insert(buf);
+                }
+                colors.len()
+            }
         }
-
-        let mut raw_data = Cursor::new(filtered_data);
-        let mut colors = HashSet::new();
-        let mut buf = [0; 3];
-        for _ in 0..ihdr.width * ihdr.height {
-            raw_data.read(&mut buf)?;
-            colors.insert(buf);
-        }
-        // loop {
-        //     match raw_data.read(&mut buf) {
-        //         Ok(_) => (),
-        //         Err(_) => break,
-        //     };
-        //     colors.insert(buf);
-        // }
-        colors.len()
     };
 
     Ok(color_count)
@@ -183,10 +189,10 @@ impl fmt::Debug for Chunk {
 }
 
 struct Ihdr {
-    width: u32,
-    height: u32,
+    width: usize,
+    height: usize,
     bit_depth: u8,
-    color_type: u8,
+    color_type: ColorType,
     compression_method: u8,
     filter_method: u8,
     interlace_method: u8,
@@ -195,15 +201,41 @@ struct Ihdr {
 impl Ihdr {
     fn new(data: &[u8]) -> Result<Ihdr> {
         let mut cur = Cursor::new(data.to_vec());
-        Ok(Ihdr {
-            width: u32::from_be_bytes(read_four_bytes(&mut cur)?),
-            height: u32::from_be_bytes(read_four_bytes(&mut cur)?),
+        let ihdr = Ihdr {
+            width: u32::from_be_bytes(read_four_bytes(&mut cur)?) as usize,
+            height: u32::from_be_bytes(read_four_bytes(&mut cur)?) as usize,
             bit_depth: data[8],
-            color_type: data[9],
+            color_type: match data[9] {
+                2 => ColorType::Truecolor,
+                6 => ColorType::TruecolorWithAlpha,
+                x => bail!("unsupported color type: {}", x),
+            },
             compression_method: data[10],
             filter_method: data[11],
             interlace_method: data[12],
-        })
+        };
+
+        ensure!(
+            ihdr.bit_depth == 8,
+            "unsupported bit depth: {}",
+            ihdr.bit_depth
+        );
+        ensure!(
+            ihdr.compression_method == 0,
+            "unknown compression method: {}",
+            ihdr.compression_method
+        );
+        ensure!(
+            ihdr.filter_method == 0,
+            "unknown filter method: {}",
+            ihdr.filter_method
+        );
+        ensure!(
+            ihdr.interlace_method == 0,
+            "interlace image is not supported"
+        );
+
+        Ok(ihdr)
     }
 }
 
@@ -229,6 +261,25 @@ fn read_four_bytes(cur: &mut Cursor<Vec<u8>>) -> Result<[u8; 4]> {
     let mut buf = [0_u8; 4];
     cur.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// The PaethPredictor function.
+/// ```text
+/// c b
+/// a x
+/// ```
+fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+    let p = a as i32 + b as i32 - c as i32;
+    let pa = (p - a as i32).abs();
+    let pb = (p - b as i32).abs();
+    let pc = (p - c as i32).abs();
+    if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }
 }
 
 enum ColorType {
