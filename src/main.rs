@@ -38,7 +38,7 @@ fn process(file: &PathBuf) {
         return;
     }
 
-    match png::count_colors(&file) {
+    match png::count_colors(file) {
         Ok(colors) => println!("{file:?}: {colors} colors"),
         Err(e) => eprintln!("{file:?}: {e}"),
     };
