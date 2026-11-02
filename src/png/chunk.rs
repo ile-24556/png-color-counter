@@ -46,7 +46,7 @@ impl Chunk {
     }
 }
 
-impl fmt::Debug for Chunk {
+impl fmt::Display for Chunk {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,

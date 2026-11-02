@@ -29,8 +29,7 @@ pub fn count_colors(path: &Path) -> Result<usize> {
         let ihdr = Chunk::new(&mut cur, &crc_table)?;
         ensure!(
             ihdr.data.len() == 13 && ihdr.type_ == *b"IHDR",
-            "wrong IHDR chunk: {:?}",
-            ihdr
+            "wrong IHDR chunk: {ihdr}",
         );
         Ihdr::new(&ihdr.data)?
     };
