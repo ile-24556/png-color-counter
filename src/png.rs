@@ -4,13 +4,13 @@ use std::io::Cursor;
 use std::io::prelude::*;
 use std::path::Path;
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 
 mod chunk;
 mod deflate;
 mod filter;
 
-use chunk::{Chunk, ColorType, Ihdr};
+use chunk::{Chunk, Ihdr};
 
 pub fn count_colors(path: &Path) -> Result<usize> {
     let crc_table = chunk::make_crc_table();
@@ -53,8 +53,8 @@ pub fn count_colors(path: &Path) -> Result<usize> {
 
     let color_count = {
         let mut raw_data = Cursor::new(raw_data);
-        match ihdr.color_type {
-            ColorType::Truecolor => {
+        match ihdr.color_type.bytes_per_pixel() {
+            3 => {
                 let mut colors = HashSet::new();
                 let mut buf = [0; 3];
                 while raw_data.read_exact(&mut buf).is_ok() {
@@ -62,7 +62,7 @@ pub fn count_colors(path: &Path) -> Result<usize> {
                 }
                 colors.len()
             }
-            ColorType::TruecolorWithAlpha => {
+            4 => {
                 let mut colors = HashSet::new();
                 let mut buf = [0; 4];
                 while raw_data.read_exact(&mut buf).is_ok() {
@@ -70,6 +70,7 @@ pub fn count_colors(path: &Path) -> Result<usize> {
                 }
                 colors.len()
             }
+            _ => bail!("unexpected bytes per pixel"),
         }
     };
 
